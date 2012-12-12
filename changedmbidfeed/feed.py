@@ -13,7 +13,7 @@ import subprocess
 from config import PG_CONNECT, OUTPUT_DIR
 from changed_ids import get_changed_ids
 
-VERSION =           "0.2"
+VERSION =           "0.1"
 PACKAGE =           "changed-mbid-feed"
 LAST_UPDATED_FILE = os.path.join(OUTPUT_DIR, "last_updated")
 DATA_DIR =          os.path.join(OUTPUT_DIR, "data")
@@ -135,8 +135,7 @@ def save_data(data_dir, sequence, timestamp, data):
         os.unlink(filename)
         sys.exit(-1)
 
-def generate_entry(data_dir, last_sequence, last_timestamp):
-
+def get_current_replication_info():
     try:
         conn = psycopg2.connect(PG_CONNECT)
     except psycopg2.OperationalError as err:
@@ -146,8 +145,12 @@ def generate_entry(data_dir, last_sequence, last_timestamp):
     cur = conn.cursor()
     cur.execute("select current_replication_sequence, last_replication_date from replication_control");
     row = cur.fetchone()
-    current_sequence = row[0]
-    current_timestamp = str(row[1])
+
+    return row[0], str(row[1])
+
+def generate_entry(data_dir, last_sequence, last_timestamp):
+
+    current_sequence, current_timestamp = get_current_replication_info()
 
     print "   last: %d at %s\ncurrent: %s at %s\n" % (last_sequence, last_timestamp, current_sequence, current_timestamp)
     if last_sequence == current_sequence:
