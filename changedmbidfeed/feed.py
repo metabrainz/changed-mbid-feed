@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from config import PG_CONNECT, OUTPUT_DIR
 from changed_ids import get_changed_ids
+from log import log
 
 VERSION =           "0.1"
 PACKAGE =           "changed-mbid-feed"
@@ -44,13 +45,13 @@ def save_state_data(sequence, timestamp):
         os.makedirs(OUTPUT_DIR)
     except os.error, e:
         if e.errno != 17: # dir exists
-            print "Error: cannot create data dir %s: %s\n" % (OUTPUT_DIR, str(e))
+            log("Error: cannot create data dir %s: %s\n" % (OUTPUT_DIR, str(e)))
             return False
 
     try:
         f = open(LAST_UPDATED_FILE, "w")
     except IOError, e:
-        print "Warning: cannot write last date file %s: %s" % (LAST_UPDATED_FILE, e)
+        log("Warning: cannot write last date file %s: %s" % (LAST_UPDATED_FILE, e))
         return False
 
     data = { 'replication_sequence' : sequence, 'timestamp' : timestamp }
@@ -68,20 +69,20 @@ def get_timestamp_from_replication_packet(sequence):
     opener = urllib2.build_opener()
     opener.addheaders = [('User-agent', '%s/%s' % (PACKAGE, VERSION))]
 
-    print "downloading: %s" % packet
+    log("downloading: %s" % packet)
     try:
         response = opener.open(packet)
     except urllib2.HTTPError, err:
         if err.code == 404:
-            print "Replication packet %d not available." % sequence
+            log("Replication packet %d not available." % sequence)
             return None
-        print err.code
+        log(err.code)
         return None
     except urllib2.URLError, err:
         if err.reason.find("550"):
-            print "Replication packet %d not available." % sequence
+            log("Replication packet %d not available." % sequence)
             return None
-        print err.reason
+        log(err.reason)
         return None
 
     tmp = tempfile.TemporaryFile()
@@ -91,7 +92,7 @@ def get_timestamp_from_replication_packet(sequence):
     try:
         tar_file = tarfile.open(mode="r:bz2", fileobj=tmp)
     except tarfile.ReadError:
-        print "Cannot read tar file. Is the packet corrupt?"
+        log("Cannot read tar file. Is the packet corrupt?")
         return None
 
     for f in tar_file:
@@ -139,7 +140,7 @@ def get_current_replication_info():
     try:
         conn = psycopg2.connect(PG_CONNECT)
     except psycopg2.OperationalError as err:
-        print "Cannot connect to database: %s" % err
+        log("Cannot connect to database: %s" % err)
         sys.exit(-1)
 
     cur = conn.cursor()
@@ -152,12 +153,14 @@ def generate_entry(data_dir, last_sequence, last_timestamp):
 
     current_sequence, current_timestamp = get_current_replication_info()
 
-    print "   last: %d at %s\ncurrent: %s at %s\n" % (last_sequence, last_timestamp, current_sequence, current_timestamp)
+    log("   last: %d at %s" % (last_sequence, last_timestamp))
+    log("current: %s at %s" % (current_sequence, current_timestamp))
     if last_sequence == current_sequence:
-        print "Replication sequence unchanged, no new data to process."
+        log("Replication sequence unchanged, no new data to process.")
         return None
 
     data = get_changed_ids(last_timestamp, current_timestamp)
     data = json.dumps({ 'data' : data }) #, sort_keys=True, indent=4)
     save_data(data_dir, current_sequence, current_timestamp, data)
     save_state_data(current_sequence, current_timestamp)
+    log("changed mbid processing complete")

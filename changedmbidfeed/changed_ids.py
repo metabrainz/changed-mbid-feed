@@ -4,17 +4,7 @@ import sys
 import psycopg2;
 from changedmbidfeed import queries
 from changedmbidfeed.config import PG_CONNECT
-
-def debug(conn, queries, start, end):
-    cur = conn.cursor()
-    for q in queries: 
-        q = q.replace("%schema%", "musicbrainz")
-        cur.execute(q + " order by gid", (start, end))
-        rows = cur.fetchall()
-        if cur.rowcount:
-            print "%s:" % q
-            for row in rows:
-                print "   " + row[0]
+from changedmbidfeed.log import log
 
 def get_ids_for_entity(conn, queries, start, end):
 
@@ -38,7 +28,7 @@ def get_changed_ids(start, end):
     try:
         conn = psycopg2.connect(PG_CONNECT)
     except psycopg2.OperationalError as err:
-        print "Cannot connect to database: %s" % err
+        log("Cannot connect to database: %s" % err)
         sys.exit(-1)
 
     data = {}
