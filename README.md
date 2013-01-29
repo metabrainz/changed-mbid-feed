@@ -22,3 +22,11 @@ this will look like this:
     <output dir>/data/changed-ids-61477.json.gz
     <output dir>/data/changed-ids-with-data-61477.json.gz
 
+Install instructions
+====================
+
+Besides a working python installl and a copy of the replicated MusicBrainz database you'll need
+the following python modules:
+
+psycopg2
+yaml

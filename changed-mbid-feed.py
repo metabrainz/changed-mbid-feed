@@ -13,7 +13,7 @@ if len(sys.argv) == 1:
     # Continue where we left off last time
     seq, timestamp = feed.read_state_data()
     if not seq:
-        log("Cannot continue. Can't read state data file.")
+        log("Cannot continue. Can't read state data file. Start a feed by running with the --create option")
         sys.exit(-1)
 
     log("Creating changed mbid feed from last replication packet")
