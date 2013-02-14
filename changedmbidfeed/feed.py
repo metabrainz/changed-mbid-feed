@@ -148,6 +148,16 @@ def save_copying(data_dir):
             sys.stderr.write("cannot write COPYING file: %s\n" % str(e))
             sys.exit(-1)
             
+def save_robots_txt(data_dir):
+    '''Save the robots.txt file into the directory with all the data files'''
+
+    robots = os.path.join(data_dir, "data/robots.txt")
+    if not os.path.exists(robots):
+        try:
+            shutil.copy(os.path.join(os.path.dirname(__file__), "../extra/COPYING-PublicDomain"), robots)
+        except shutil.Error:
+            sys.stderr.write("cannot write robots.txt file: %s\n" % str(e))
+            sys.exit(-1)
 
 def save_latest_file(data_dir, seq):
     '''Create the LATEST file that gives the name of the latest and greatest file'''
@@ -188,5 +198,6 @@ def generate_entry(data_dir, last_sequence, last_timestamp):
     save_data(data_dir, current_sequence, current_timestamp, data)
     save_state_data(current_sequence, current_timestamp)
     save_copying(data_dir)
+    save_robots_txt(data_dir)
     save_latest_file(data_dir, current_sequence)
     log("changed mbid processing complete")
