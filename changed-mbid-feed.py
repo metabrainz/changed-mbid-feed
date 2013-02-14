@@ -34,7 +34,4 @@ if len(sys.argv) == 2 and (sys.argv[1] == '-c' or sys.argv[1] == '--create'):
         log("Abort")
         sys.exit(-1)
 
-    log("The timestamp for the last replication packet has been saved. The\n" +
-        "feed should now be set up. Call this script once an hour\n"          +
-        "after a new replication packet is available to start dumping\n"      +
-        "feed packets.\n")
+    log("The timestamp for the last replication packet has been saved. The feed should now be set up. Call this script once an hour after a new replication packet is available to start dumping feed packets.\n")

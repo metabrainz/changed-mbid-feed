@@ -10,6 +10,7 @@ import tempfile
 import tarfile
 import shutil
 import subprocess
+import shutil
 from config import PG_CONNECT, OUTPUT_DIR
 from changed_ids import get_changed_ids
 from log import log
@@ -136,6 +137,29 @@ def save_data(data_dir, sequence, timestamp, data):
         os.unlink(filename)
         sys.exit(-1)
 
+def save_copying(data_dir):
+    '''Save the COPYING file into the directory with all the data files'''
+
+    copying = os.path.join(data_dir, "data/COPYING")
+    if not os.path.exists(copying):
+        try:
+            shutil.copy(os.path.join(os.path.dirname(__file__), "../extra/COPYING-PublicDomain"), copying)
+        except shutil.Error:
+            sys.stderr.write("cannot write COPYING file: %s\n" % str(e))
+            sys.exit(-1)
+            
+
+def save_latest_file(data_dir, seq):
+    '''Create the LATEST file that gives the name of the latest and greatest file'''
+    latest = os.path.join(data_dir, "data/LATEST")
+    try:
+        f = open(latest, "w")
+        f.write("%s\n" % seq)
+        f.close()
+    except IOError, e:
+        sys.stderr.write("cannot write LATEST file: %s\n" % str(e))
+        sys.exit(-1)
+
 def get_current_replication_info():
     try:
         conn = psycopg2.connect(PG_CONNECT)
@@ -163,4 +187,6 @@ def generate_entry(data_dir, last_sequence, last_timestamp):
     data = json.dumps({ 'data' : data }) #, sort_keys=True, indent=4)
     save_data(data_dir, current_sequence, current_timestamp, data)
     save_state_data(current_sequence, current_timestamp)
+    save_copying(data_dir)
+    save_latest_file(data_dir, current_sequence)
     log("changed mbid processing complete")
