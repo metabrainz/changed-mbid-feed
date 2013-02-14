@@ -159,8 +159,20 @@ def save_robots_txt(data_dir):
             sys.stderr.write("cannot write robots.txt file: %s\n" % str(e))
             sys.exit(-1)
 
-def save_latest_file(data_dir, seq):
+def save_header_html(data_dir):
+    '''Save the HEADER.html file into the directory with all the data files'''
+
+    header = os.path.join(data_dir, "data/HEADER.html")
+    if not os.path.exists(header):
+        try:
+            shutil.copy(os.path.join(os.path.dirname(__file__), "../extra/HEADER.html"), header)
+        except shutil.Error:
+            sys.stderr.write("cannot write HEADER.html file: %s\n" % str(e))
+            sys.exit(-1)
+
+def save_latest_files(data_dir, seq):
     '''Create the LATEST file that gives the name of the latest and greatest file'''
+
     latest = os.path.join(data_dir, "data/LATEST")
     try:
         f = open(latest, "w")
@@ -168,6 +180,15 @@ def save_latest_file(data_dir, seq):
         f.close()
     except IOError, e:
         sys.stderr.write("cannot write LATEST file: %s\n" % str(e))
+        sys.exit(-1)
+
+    latest = os.path.join(data_dir, "data/LATEST.file")
+    try:
+        f = open(latest, "w")
+        f.write("changed-ids-%s.json.gz\n" % seq)
+        f.close()
+    except IOError, e:
+        sys.stderr.write("cannot write LATEST.file file: %s\n" % str(e))
         sys.exit(-1)
 
 def get_current_replication_info():
@@ -197,7 +218,8 @@ def generate_entry(data_dir, last_sequence, last_timestamp):
     data = json.dumps({ 'data' : data }) #, sort_keys=True, indent=4)
     save_data(data_dir, current_sequence, current_timestamp, data)
     save_state_data(current_sequence, current_timestamp)
+    save_header_html(data_dir)
     save_copying(data_dir)
     save_robots_txt(data_dir)
-    save_latest_file(data_dir, current_sequence)
+    save_latest_files(data_dir, current_sequence)
     log("changed mbid processing complete")
