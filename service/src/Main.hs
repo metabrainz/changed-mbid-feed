@@ -11,7 +11,7 @@ import Data.List (isSuffixOf)
 import Data.Maybe (catMaybes)
 import Data.Monoid
 import Data.Text (Text)
-import Data.Time (UTCTime, parseTime)
+import Data.Time (UTCTime, readTime, parseTime)
 import Data.UUID (fromString)
 import Snap.Core
 import Snap.Http.Server
@@ -82,7 +82,7 @@ instance Monoid ChangeSet where
 instance FromJSON ChangePacket where
   parseJSON (Object j) =
       ChangePacket <$> (j .: "data" >>= go)
-                   <*> j .: "timestamp"
+                   <*> (readTime defaultTimeLocale "%Y-%m-%d %H:%M:%S%Q+00:00" <$> j .: "timestamp")
     where go o = ChangeSet <$> (HashSet.fromList <$> o .: "artist")
                            <*> (HashSet.fromList <$> o .: "label")
                            <*> (HashSet.fromList <$> o .: "recording")
