@@ -215,7 +215,7 @@ def generate_entry(data_dir, last_sequence, last_timestamp):
         return None
 
     data = get_changed_ids(last_timestamp, current_timestamp)
-    data = json.dumps({ 'data' : data }) #, sort_keys=True, indent=4)
+    data = json.dumps({ 'data' : data, 'timestamp' : current_timestamp, 'sequence' : current_sequence })
     save_data(data_dir, current_sequence, current_timestamp, data)
     save_state_data(current_sequence, current_timestamp)
     save_header_html(data_dir)
