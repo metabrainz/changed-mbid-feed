@@ -170,6 +170,7 @@ main = do
    -- Main request handler
    since changeSets dateMapper = do
      t' <- join . fmap parseTimeParameter <$> getParam "x"
+     modifyResponse (setContentType "application/json")
      case t' of
        Nothing -> clientError "Timestamp could not be parsed" []
        Just t -> do
