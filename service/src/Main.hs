@@ -176,11 +176,12 @@ main = do
        Just t -> do
          -- The format of the timestamp was valid, but we need to make sure
          -- its in our domain
+         let latestTime = Map.findMax dateMapper
          case Map.lookupGE t dateMapper of
            Nothing ->
              clientError "Specified timestamp is later than the latest known changes"
-               [ "latest" .= Map.findMax dateMapper ]
-           Just (latestTime, csId) -> do
+               [ "latest" .= latestTime ]
+           Just (_, csId) -> do
              -- The time was in our domain, so we round *up* to the nearest
              -- change set, and then take change set and all subsequent
              -- change sets. We then emit the union of these.
