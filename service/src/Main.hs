@@ -15,6 +15,7 @@ import Data.Time (UTCTime, readTime, parseTime)
 import Data.UUID (fromString)
 import Snap.Core
 import Snap.Http.Server
+import Snap.Util.GZip (withCompression)
 import System.Directory
 import System.FilePath
 import System.Locale (defaultTimeLocale)
@@ -162,7 +163,7 @@ main = do
   quickHttpServe $ route
     [("/since/:x", if null changePackets
                      then emptyServer
-                     else since changeSets dateMapper)]
+                     else withCompression $ since changeSets dateMapper)]
 
  where
 
