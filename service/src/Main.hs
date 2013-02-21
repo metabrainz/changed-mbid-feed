@@ -43,6 +43,17 @@ data ChangeSet = ChangeSet { artistChanges :: !(HashSet MBID)
                            }
 
 
+intersect :: ChangeSet -> ChangeSet -> ChangeSet
+intersect a b = ChangeSet
+  { artistChanges = artistChanges a `HashSet.intersection` artistChanges b
+  , labelChanges = labelChanges a `HashSet.intersection` labelChanges b
+  , recordingChanges = recordingChanges a `HashSet.intersection` recordingChanges b
+  , releaseChanges = releaseChanges a `HashSet.intersection` releaseChanges b
+  , releaseGroupChanges = releaseGroupChanges a `HashSet.intersection` releaseGroupChanges b
+  , workChanges = workChanges a `HashSet.intersection` workChanges b
+  }
+
+
 --------------------------------------------------------------------------------
 -- | An 'MBID' is the plain text, base 16, representation of a UUID. This is
 -- a @newtype@ around 'Text' for speed, but also so you don't start accidently
@@ -81,14 +92,20 @@ instance Monoid ChangeSet where
 -- each list of MBIDs into a 'HashSet'.
 instance FromJSON ChangePacket where
   parseJSON (Object j) =
-      ChangePacket <$> (j .: "data" >>= go)
+      ChangePacket <$> j .: "data"
                    <*> (readTime defaultTimeLocale "%Y-%m-%d %H:%M:%S%Q+00:00" <$> j .: "timestamp")
-    where go o = ChangeSet <$> (HashSet.fromList <$> o .: "artist")
-                           <*> (HashSet.fromList <$> o .: "label")
-                           <*> (HashSet.fromList <$> o .: "recording")
-                           <*> (HashSet.fromList <$> o .: "release")
-                           <*> (HashSet.fromList <$> o .: "release_group")
-                           <*> (HashSet.fromList <$> o .: "work")
+
+  parseJSON _ = mzero
+
+
+instance FromJSON ChangeSet where
+  parseJSON (Object o) =
+    ChangeSet <$> (HashSet.fromList <$> o .: "artist" <|> pure mempty)
+              <*> (HashSet.fromList <$> o .: "label" <|> pure mempty)
+              <*> (HashSet.fromList <$> o .: "recording" <|> pure mempty)
+              <*> (HashSet.fromList <$> o .: "release" <|> pure mempty)
+              <*> (HashSet.fromList <$> o .: "release_group" <|> pure mempty)
+              <*> (HashSet.fromList <$> o .: "work" <|> pure mempty)
   parseJSON _ = mzero
 
 
@@ -153,7 +170,7 @@ main = do
    since changeSets dateMapper = do
      t' <- join . fmap parseTimeParameter <$> getParam "x"
      case t' of
-       Nothing -> clientError "Timestamp could not be paresd" []
+       Nothing -> clientError "Timestamp could not be parsed" []
        Just t -> do
          -- The format of the timestamp was valid, but we need to make sure
          -- its in our domain
@@ -168,9 +185,15 @@ main = do
              let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
              let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
 
-             writeLBS $ encode $ ChangePacket { packetChangeset = changeSet
-                                              , packetTimestamp = latestTime
-                                              }
+             finalChangeSet' <- method GET (pure $ Just changeSet)
+                            <|> (method POST $ fmap (intersect changeSet) . decode' <$> readRequestBody 10485760)
+
+             case finalChangeSet' of
+               Just finalChangeSet ->
+                 writeLBS $ encode $ ChangePacket { packetChangeset = finalChangeSet
+                                                  , packetTimestamp = latestTime
+                                                  }
+               Nothing -> clientError "Unable to parse request body" []
 
    parseTimeParameter = parseTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" .
      Text.unpack . Encoding.decodeUtf8
