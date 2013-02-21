@@ -2,7 +2,9 @@
 import Prelude hiding (readFile)
 
 import Control.Applicative
-import Control.Monad (forM, join, mzero)
+import Control.Concurrent.STM
+import Control.Monad (forM, join, mzero, void)
+import Control.Monad.IO.Class (liftIO)
 import Data.Aeson
 import Data.ByteString.Lazy (readFile)
 import Data.HashSet (HashSet)
@@ -19,6 +21,7 @@ import Snap.Util.GZip (withCompression)
 import System.Directory
 import System.FilePath
 import System.Locale (defaultTimeLocale)
+import System.Posix.Signals
 import qualified Data.HashSet as HashSet
 import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
@@ -139,18 +142,13 @@ instance FromJSON MBID where
 -- | Given a directory with JSON files name xxx.json, where xxx is the sequence
 -- index, this will return a list of associations of sequence index to
 -- 'ChangePacket'. Any 'ChangePacket's that cannot be parsed will be skipped.
-loadChangeSets :: FilePath -> IO [(Int, ChangePacket)]
+loadChangeSets :: FilePath -> IO (IntMap.IntMap ChangeSet, Map.Map UTCTime IntMap.Key)
 loadChangeSets d = do
   changeSetFiles <- filter (isSuffixOf ".json") <$> getDirectoryContents d
-  fmap catMaybes $ forM changeSetFiles $ \f -> do
+
+  changePackets <- fmap catMaybes $ forM changeSetFiles $ \f -> do
     let csId = read $ reverse $ drop 5 $ reverse f
     fmap (csId, ) . decode' <$> readFile (d </> f)
-
-
---------------------------------------------------------------------------------
-main :: IO ()
-main = do
-  changePackets <- loadChangeSets "change-sets"
 
   -- changeSets is an 'IntMap' to 'ChangeSet's.
   let changeSets =
@@ -160,43 +158,68 @@ main = do
   let dateMapper =
         Map.fromList $ map (\(i, ChangePacket _ ts) -> (ts, i)) changePackets
 
+  return (changeSets, dateMapper)
+
+
+--------------------------------------------------------------------------------
+main :: IO ()
+main = do
+  (changeSetsTVar, dateMapperTVar) <- liftIO $ atomically $
+    (,) <$> newTVar mempty <*> newTVar mempty
+
+  void $ installHandler sigHUP
+    (Catch $ reload changeSetsTVar dateMapperTVar) Nothing
+
   quickHttpServe $ route
-    [("/since/:x", if null changePackets
-                     then emptyServer
-                     else withCompression $ since changeSets dateMapper)]
+    [("/since/:x", withCompression $ since changeSetsTVar dateMapperTVar)]
 
  where
+   reload changeSetsTVar dateMapperTVar = do
+     (changeSets, dateMapper) <- loadChangeSets "change-sets"
+     atomically $ do
+       readTVar changeSetsTVar *> writeTVar changeSetsTVar changeSets
+       readTVar dateMapperTVar *> writeTVar dateMapperTVar dateMapper
 
    -- Main request handler
-   since changeSets dateMapper = do
+   since changeSetsTVar dateMapperTVar = do
      t' <- join . fmap parseTimeParameter <$> getParam "x"
      modifyResponse (setContentType "application/json")
      case t' of
        Nothing -> clientError "Timestamp could not be parsed" []
        Just t -> do
-         -- The format of the timestamp was valid, but we need to make sure
-         -- its in our domain
-         let latestTime = Map.findMax dateMapper
-         case Map.lookupGE t dateMapper of
-           Nothing ->
-             clientError "Specified timestamp is later than the latest known changes"
-               [ "latest" .= latestTime ]
-           Just (_, csId) -> do
-             -- The time was in our domain, so we round *up* to the nearest
-             -- change set, and then take change set and all subsequent
-             -- change sets. We then emit the union of these.
-             let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
-             let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
+         -- The format of the timestamp was valid, but we need to make sure its
+         -- in our domain. It is at this point we read the current known change
+         -- sets/date mapper. Hence a reload during this request will have no
+         -- effect.
+         (dateMapper, changeSets) <- liftIO $ atomically $
+           (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
 
-             finalChangeSet' <- method GET (pure $ Just changeSet)
-                            <|> (method POST $ fmap (intersect changeSet) . decode' <$> readRequestBody 10485760)
+         if IntMap.null changeSets
+           then emptyServer
+           else do
+             let (latestTime, _) = Map.findMax dateMapper
+             case Map.lookupGE t dateMapper of
+               Nothing ->
+                 clientError "Specified timestamp is later than the latest known changes"
+                   [ "latest" .= latestTime ]
+               Just (_, csId) -> do
+                 -- The time was in our domain, so we round *up* to the nearest
+                 -- change set, and then take change set and all subsequent
+                 -- change sets. We then emit the union of these.
+                 let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
+                 let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
 
-             case finalChangeSet' of
-               Just finalChangeSet ->
-                 writeLBS $ encode $ ChangePacket { packetChangeset = finalChangeSet
-                                                  , packetTimestamp = latestTime
-                                                  }
-               Nothing -> clientError "Unable to parse request body" []
+                 finalChangeSet' <- method GET (pure $ Just changeSet)
+                                <|> (method POST $
+                                       fmap (intersect changeSet) . decode'
+                                         <$> readRequestBody 10485760)
+
+                 case finalChangeSet' of
+                   Just finalChangeSet ->
+                     writeLBS $ encode $ ChangePacket { packetChangeset = finalChangeSet
+                                                      , packetTimestamp = latestTime
+                                                      }
+                   Nothing -> clientError "Unable to parse request body" []
 
    parseTimeParameter = parseTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" .
      Text.unpack . Encoding.decodeUtf8

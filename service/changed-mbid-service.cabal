@@ -25,4 +25,7 @@ executable changed-mbid-service
     directory <1.2,
     filepath <1.4,
     containers >=0.5,
-    time
+    time,
+    transformers,
+    stm,
+    unix
