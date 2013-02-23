@@ -22,6 +22,7 @@ import System.Directory
 import System.FilePath
 import System.Locale (defaultTimeLocale)
 import System.Posix.Signals
+import qualified Data.Aeson.Types as Aeson
 import qualified Data.HashSet as HashSet
 import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
@@ -34,6 +35,11 @@ data ChangePacket = ChangePacket { packetChangeset :: ChangeSet
                                  , packetTimestamp :: UTCTime
                                  }
 
+
+--------------------------------------------------------------------------------
+-- | A 'UnionPacket' is just like a 'ChangePacket', except the timestamp is
+-- the timestamp of the latest change packet the server knows about.
+newtype UnionPacket = UnionPacket ChangePacket
 
 --------------------------------------------------------------------------------
 -- | A 'ChangeSet' consists of a set of 'MBID's that have changed in some way,
@@ -117,20 +123,20 @@ instance FromJSON ChangeSet where
 -- We turn 'ChangePacket's back to JSON is *almost* the same way, except we use
 -- the @latest@ key for the timestamp, to point to the latest known change
 -- packet.
-instance ToJSON ChangePacket where
-  toJSON (ChangePacket c ts) =
-    object
-      [ "latest" .= ts
-      , "data" .= object
-          [ "artist" .= artistChanges c
-          , "label" .= labelChanges c
-          , "recording" .= recordingChanges c
-          , "release" .= releaseChanges c
-          , "release_group" .= releaseGroupChanges c
-          , "work" .= workChanges c
-          ]
-        ]
+instance ToJSON UnionPacket where
+  toJSON (UnionPacket (ChangePacket c ts)) =
+    object [ "latest" .= ts, "data" .= c]
 
+
+instance ToJSON ChangeSet where
+  toJSON c = object
+    [ "artist" .= artistChanges c
+    , "label" .= labelChanges c
+    , "recording" .= recordingChanges c
+    , "release" .= releaseChanges c
+    , "release_group" .= releaseGroupChanges c
+    , "work" .= workChanges c
+    ]
 
 --------------------------------------------------------------------------------
 instance FromJSON MBID where
@@ -167,69 +173,135 @@ main = do
   (changeSetsTVar, dateMapperTVar) <- liftIO $ atomically $
     (,) <$> newTVar mempty <*> newTVar mempty
 
-  void $ installHandler sigHUP
-    (Catch $ reload changeSetsTVar dateMapperTVar) Nothing
+  let goReload = reload changeSetsTVar dateMapperTVar
+  goReload
 
-  quickHttpServe $ route
-    [("/since/:x", withCompression $ since changeSetsTVar dateMapperTVar)]
+  void $ installHandler sigHUP (Catch goReload) Nothing
 
- where
-   reload changeSetsTVar dateMapperTVar = do
-     (changeSets, dateMapper) <- loadChangeSets "change-sets"
-     atomically $ do
-       readTVar changeSetsTVar *> writeTVar changeSetsTVar changeSets
-       readTVar dateMapperTVar *> writeTVar dateMapperTVar dateMapper
+  quickHttpServe $ withCompression $ do
+    modifyResponse (setContentType "application/json")
+    route
+      [ ("/since/:timeStamp", since changeSetsTVar dateMapperTVar)
+      , ("/on/:timeStamp", changesOn changeSetsTVar dateMapperTVar)
+      ]
 
-   -- Main request handler
-   since changeSetsTVar dateMapperTVar = do
-     t' <- join . fmap parseTimeParameter <$> getParam "x"
-     modifyResponse (setContentType "application/json")
-     case t' of
-       Nothing -> clientError "Timestamp could not be parsed" []
-       Just t -> do
-         -- The format of the timestamp was valid, but we need to make sure its
-         -- in our domain. It is at this point we read the current known change
-         -- sets/date mapper. Hence a reload during this request will have no
-         -- effect.
-         (dateMapper, changeSets) <- liftIO $ atomically $
-           (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
 
-         if IntMap.null changeSets
-           then emptyServer
-           else do
-             let (latestTime, _) = Map.findMax dateMapper
-             case Map.lookupGE t dateMapper of
-               Nothing ->
-                 clientError "Specified timestamp is later than the latest known changes"
-                   [ "latest" .= latestTime ]
-               Just (_, csId) -> do
-                 -- The time was in our domain, so we round *up* to the nearest
-                 -- change set, and then take change set and all subsequent
-                 -- change sets. We then emit the union of these.
-                 let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
-                 let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
+--------------------------------------------------------------------------------
+reload :: TVar (IntMap.IntMap ChangeSet) -> TVar (Map.Map UTCTime IntMap.Key) -> IO ()
+reload changeSetsTVar dateMapperTVar = do
+   (changeSets, dateMapper) <- loadChangeSets "change-sets"
+   atomically $ do
+     readTVar changeSetsTVar *> writeTVar changeSetsTVar changeSets
+     readTVar dateMapperTVar *> writeTVar dateMapperTVar dateMapper
 
-                 finalChangeSet' <- method GET (pure $ Just changeSet)
-                                <|> (method POST $
-                                       fmap (intersect changeSet) . decode'
-                                         <$> readRequestBody 10485760)
 
-                 case finalChangeSet' of
-                   Just finalChangeSet ->
-                     writeLBS $ encode $ ChangePacket { packetChangeset = finalChangeSet
-                                                      , packetTimestamp = latestTime
-                                                      }
-                   Nothing -> clientError "Unable to parse request body" []
+--------------------------------------------------------------------------------
+-- | Main request handler
+since :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> TVar (Map.Map UTCTime IntMap.Key) -> m ()
+since changeSetsTVar dateMapperTVar = do
+  t' <- parseTimeParameter
+  case t' of
+    Nothing -> clientError "Timestamp could not be parsed" []
+    Just t -> do
+      -- The format of the timestamp was valid, but we need to make sure its
+      -- in our domain. It is at this point we read the current known change
+      -- sets/date mapper. Hence a reload during this request will have no
+      -- effect.
+      (dateMapper, changeSets) <- liftIO $ atomically $
+        (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
 
-   parseTimeParameter = parseTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" .
-     Text.unpack . Encoding.decodeUtf8
+      if IntMap.null changeSets
+        then emptyServer
+        else do
+          let (latestTime, _) = Map.findMax dateMapper
+          case Map.lookupGE t dateMapper of
+            Nothing ->
+              clientError "Specified timestamp is later than the latest known changes"
+                [ "latest" .= latestTime ]
+            Just (_, csId) -> do
+              -- The time was in our domain, so we round *up* to the nearest
+              -- change set, and then take change set and all subsequent
+              -- change sets. We then emit the union of these.
+              let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
+              let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
 
-   clientError t extra =
-     writeError 400 $ [ "error" .= (t :: Text) ] ++ extra
+              withFilteredChangeSet changeSet $ \c -> writeJSON $
+                UnionPacket ChangePacket { packetChangeset = c
+                                         , packetTimestamp = latestTime
+                                         }
 
-   emptyServer =
-     writeError 500 [ "error" .= ("The server has no change sets"::Text) ]
 
-   writeError code e = do
-     writeLBS $ encode $ object e
-     modifyResponse (setResponseCode code)
+--------------------------------------------------------------------------------
+-- | Main request handler
+changesOn :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> TVar (Map.Map UTCTime IntMap.Key) -> m ()
+changesOn changeSetsTVar dateMapperTVar = do
+  t' <- parseTimeParameter
+  case t' of
+    Nothing -> clientError "Timestamp could not be parsed" []
+    Just t -> do
+      -- The format of the timestamp was valid, but we need to make sure its
+      -- in our domain. It is at this point we read the current known change
+      -- sets/date mapper. Hence a reload during this request will have no
+      -- effect.
+      (dateMapper, changeSets) <- liftIO $ atomically $
+        (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
+
+      if IntMap.null changeSets
+        then emptyServer
+        else do
+          case Map.lookupGE t dateMapper of
+            Nothing ->
+              clientError "Specified timestamp is later than the latest known changes"
+                [ "latest" .= fst (Map.findMax dateMapper) ]
+            Just (_, csId) -> redirectTo csId
+  where
+    redirectTo csId = redirect $ Encoding.encodeUtf8 $ Text.pack $
+      "http://changed-mbids.musicbrainz.org/pub/musicbrainz/data/changed-mbids/changed-ids-" ++
+        (show csId) ++ ".json.gz"
+
+
+--------------------------------------------------------------------------------
+withFilteredChangeSet :: MonadSnap m => ChangeSet -> (ChangeSet -> m ()) -> m ()
+withFilteredChangeSet changeSet a = do
+  finalChangeSet' <- method GET (pure $ Just changeSet)
+                 <|> (method POST $
+                        fmap (intersect changeSet) . decode'
+                          <$> readRequestBody 10485760)
+
+  maybe noParse a finalChangeSet'
+
+  where
+    noParse = clientError "Unable to parse request body" []
+
+writeJSON :: (MonadSnap m, ToJSON a) => a -> m ()
+writeJSON = writeLBS . encode
+
+--------------------------------------------------------------------------------
+parseTimeParameter :: MonadSnap m => m (Maybe UTCTime)
+parseTimeParameter = join . fmap parser <$> getParam "timeStamp"
+  where parser = parseTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" .
+          Text.unpack . Encoding.decodeUtf8
+
+
+--------------------------------------------------------------------------------
+clientError :: MonadSnap m => Text -> [Aeson.Pair] -> m ()
+clientError e extra =
+  writeError 400 $ [ "error" .= e ] ++ extra
+
+
+--------------------------------------------------------------------------------
+serverError :: MonadSnap m => Text -> m ()
+serverError e =
+  writeError 500 $ [ "error" .= e ]
+
+
+--------------------------------------------------------------------------------
+emptyServer :: MonadSnap m => m ()
+emptyServer = serverError "The server has no change sets"
+
+
+--------------------------------------------------------------------------------
+writeError :: MonadSnap m => Int -> [Aeson.Pair] -> m ()
+writeError code e = do
+  writeLBS $ encode $ object e
+  modifyResponse (setResponseCode code)
