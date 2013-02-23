@@ -185,11 +185,17 @@ main = do
 
   quickHttpServe $ withCompression $ do
     modifyResponse (setContentType "application/json")
-    route
-      [ ("/since/:timeStamp", since changeSetsTVar dateMapperTVar)
-      , ("/on/:timeStamp", changesOn changeSetsTVar dateMapperTVar)
-      , ("/latest", redirectToLatest changeSetsTVar)
-      ]
+
+    (dateMapper, changeSets) <- liftIO $ atomically $
+      (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
+
+    eitherT id return $ do
+      assertNotEmpty changeSets
+      lift $ route
+        [ ("/since/:timeStamp", since changeSets dateMapper)
+        , ("/on/:timeStamp", changesOn dateMapper)
+        , ("/latest", redirectToLatest changeSets)
+        ]
 
 
 --------------------------------------------------------------------------------
@@ -203,14 +209,9 @@ reload changeSetsTVar dateMapperTVar = do
 
 --------------------------------------------------------------------------------
 -- | Main request handler
-since :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> TVar (Map.Map UTCTime IntMap.Key) -> m ()
-since changeSetsTVar dateMapperTVar = eitherT id return $ do
+since :: MonadSnap m => IntMap.IntMap ChangeSet -> Map.Map UTCTime IntMap.Key -> m ()
+since changeSets dateMapper = eitherT id return $ do
   t <- parseTimeParameter
-
-  (dateMapper, changeSets) <- liftIO $ atomically $
-    (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
-
-  assertNotEmpty changeSets
 
   csId <- nearestChangeSet t dateMapper
   let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
@@ -223,21 +224,15 @@ since changeSetsTVar dateMapperTVar = eitherT id return $ do
 
 --------------------------------------------------------------------------------
 -- | Main request handler
-changesOn :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> TVar (Map.Map UTCTime IntMap.Key) -> m ()
-changesOn changeSetsTVar dateMapperTVar = eitherT id return $ do
+changesOn :: MonadSnap m => Map.Map UTCTime IntMap.Key -> m ()
+changesOn dateMapper = eitherT id return $ do
   t <- parseTimeParameter
 
-  (dateMapper, changeSets) <- liftIO $ atomically $
-    (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
-
-  assertNotEmpty changeSets
-
-  lift $ do
-    case Map.lookupGE t dateMapper of
-      Nothing ->
-        clientError "Specified timestamp is later than the latest known changes"
-          [ "latest" .= fst (Map.findMax dateMapper) ]
-      Just (_, csId) -> redirectTo csId
+  case Map.lookupGE t dateMapper of
+    Nothing -> EitherT $ return $ Left $
+      clientError "Specified timestamp is later than the latest known changes"
+        [ "latest" .= fst (Map.findMax dateMapper) ]
+    Just (_, csId) -> lift (redirectTo csId)
 
 
 --------------------------------------------------------------------------------
@@ -250,18 +245,15 @@ nearestChangeSet t dateMapper = case Map.lookupGE t dateMapper of
 
 
 --------------------------------------------------------------------------------
+redirectToLatest :: MonadSnap m => IntMap.IntMap ChangeSet -> m ()
+redirectToLatest changeSets = redirectTo (fst $ IntMap.findMax changeSets)
+
+
+--------------------------------------------------------------------------------
 redirectTo :: MonadSnap m => Int -> m ()
 redirectTo csId = redirect $ Encoding.encodeUtf8 $ Text.pack $
   "http://changed-mbids.musicbrainz.org/pub/musicbrainz/data/changed-mbids/changed-ids-" ++
     (show csId) ++ ".json.gz"
-
-
---------------------------------------------------------------------------------
-redirectToLatest :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> m ()
-redirectToLatest changeSetsTVar = eitherT id return $ do
-  changeSets <- liftIO $ atomically $ readTVar changeSetsTVar
-  assertNotEmpty changeSets
-  lift $ redirectTo (fst $ IntMap.findMax changeSets)
 
 
 --------------------------------------------------------------------------------
