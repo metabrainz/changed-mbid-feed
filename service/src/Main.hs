@@ -6,7 +6,6 @@ import Control.Concurrent.STM
 import Control.Monad (forM, join, mzero, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson
-import Data.ByteString.Lazy (readFile)
 import Data.HashSet (HashSet)
 import Data.Hashable
 import Data.List (isSuffixOf)
@@ -23,10 +22,12 @@ import System.FilePath
 import System.Locale (defaultTimeLocale)
 import System.Posix.Signals
 import qualified Data.Aeson.Types as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashSet as HashSet
 import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import qualified Data.Text.Encoding as Encoding
 
 --------------------------------------------------------------------------------
@@ -154,7 +155,8 @@ loadChangeSets d = do
 
   changePackets <- fmap catMaybes $ forM changeSetFiles $ \f -> do
     let csId = read $ reverse $ drop 5 $ reverse f
-    fmap (csId, ) . decode' <$> readFile (d </> f)
+    fmap (csId, ) . decode' . LBS.fromChunks . pure . Encoding.encodeUtf8
+      <$> Text.readFile (d </> f)
 
   -- changeSets is an 'IntMap' to 'ChangeSet's.
   let changeSets =
