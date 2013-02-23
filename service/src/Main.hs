@@ -3,8 +3,11 @@ import Prelude hiding (readFile)
 
 import Control.Applicative
 import Control.Concurrent.STM
+import Control.Error (note)
 import Control.Monad (forM, join, mzero, void)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans (lift)
+import Control.Monad.Trans.Either
 import Data.Aeson
 import Data.HashSet (HashSet)
 import Data.Hashable
@@ -201,62 +204,49 @@ reload changeSetsTVar dateMapperTVar = do
 --------------------------------------------------------------------------------
 -- | Main request handler
 since :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> TVar (Map.Map UTCTime IntMap.Key) -> m ()
-since changeSetsTVar dateMapperTVar = do
-  t' <- parseTimeParameter
-  case t' of
-    Nothing -> clientError "Timestamp could not be parsed" []
-    Just t -> do
-      -- The format of the timestamp was valid, but we need to make sure its
-      -- in our domain. It is at this point we read the current known change
-      -- sets/date mapper. Hence a reload during this request will have no
-      -- effect.
-      (dateMapper, changeSets) <- liftIO $ atomically $
-        (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
+since changeSetsTVar dateMapperTVar = eitherT id return $ do
+  t <- parseTimeParameter
 
-      if IntMap.null changeSets
-        then emptyServer
-        else do
-          let (latestTime, _) = Map.findMax dateMapper
-          case Map.lookupGE t dateMapper of
-            Nothing ->
-              clientError "Specified timestamp is later than the latest known changes"
-                [ "latest" .= latestTime ]
-            Just (_, csId) -> do
-              -- The time was in our domain, so we round *up* to the nearest
-              -- change set, and then take change set and all subsequent
-              -- change sets. We then emit the union of these.
-              let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
-              let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
+  (dateMapper, changeSets) <- liftIO $ atomically $
+    (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
 
-              withFilteredChangeSet changeSet $ \c -> writeJSON $
-                UnionPacket ChangePacket { packetChangeset = c
-                                         , packetTimestamp = latestTime
-                                         }
+  assertNotEmpty changeSets
 
+  csId <- nearestChangeSet t dateMapper
+  let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
+  let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
+
+  withFilteredChangeSet changeSet $ \c -> writeJSON $
+    UnionPacket ChangePacket { packetChangeset = c
+                             , packetTimestamp = fst $ Map.findMax dateMapper
+                             }
 
 --------------------------------------------------------------------------------
 -- | Main request handler
 changesOn :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> TVar (Map.Map UTCTime IntMap.Key) -> m ()
-changesOn changeSetsTVar dateMapperTVar = do
-  t' <- parseTimeParameter
-  case t' of
-    Nothing -> clientError "Timestamp could not be parsed" []
-    Just t -> do
-      -- The format of the timestamp was valid, but we need to make sure its
-      -- in our domain. It is at this point we read the current known change
-      -- sets/date mapper. Hence a reload during this request will have no
-      -- effect.
-      (dateMapper, changeSets) <- liftIO $ atomically $
-        (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
+changesOn changeSetsTVar dateMapperTVar = eitherT id return $ do
+  t <- parseTimeParameter
 
-      if IntMap.null changeSets
-        then emptyServer
-        else do
-          case Map.lookupGE t dateMapper of
-            Nothing ->
-              clientError "Specified timestamp is later than the latest known changes"
-                [ "latest" .= fst (Map.findMax dateMapper) ]
-            Just (_, csId) -> redirectTo csId
+  (dateMapper, changeSets) <- liftIO $ atomically $
+    (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
+
+  assertNotEmpty changeSets
+
+  lift $ do
+    case Map.lookupGE t dateMapper of
+      Nothing ->
+        clientError "Specified timestamp is later than the latest known changes"
+          [ "latest" .= fst (Map.findMax dateMapper) ]
+      Just (_, csId) -> redirectTo csId
+
+
+--------------------------------------------------------------------------------
+nearestChangeSet :: MonadSnap m => UTCTime -> Map.Map UTCTime IntMap.Key -> EitherT (m ()) m IntMap.Key
+nearestChangeSet t dateMapper = case Map.lookupGE t dateMapper of
+  Nothing -> EitherT $ return $ Left $
+    clientError "Specified timestamp is later than the latest known changes"
+      [ "latest" .= fst (Map.findMax dateMapper) ]
+  Just (_, csId) -> return csId
 
 
 --------------------------------------------------------------------------------
@@ -268,32 +258,37 @@ redirectTo csId = redirect $ Encoding.encodeUtf8 $ Text.pack $
 
 --------------------------------------------------------------------------------
 redirectToLatest :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> m ()
-redirectToLatest changeSetsTVar = do
+redirectToLatest changeSetsTVar = eitherT id return $ do
   changeSets <- liftIO $ atomically $ readTVar changeSetsTVar
-  if IntMap.null changeSets
-    then emptyServer
-    else redirectTo (fst $ IntMap.findMax changeSets)
+  assertNotEmpty changeSets
+  lift $ redirectTo (fst $ IntMap.findMax changeSets)
 
 
 --------------------------------------------------------------------------------
-withFilteredChangeSet :: MonadSnap m => ChangeSet -> (ChangeSet -> m ()) -> m ()
+withFilteredChangeSet :: MonadSnap m => ChangeSet -> (ChangeSet -> m ()) -> EitherT (m ()) m ()
 withFilteredChangeSet changeSet a = do
-  finalChangeSet' <- method GET (pure $ Just changeSet)
-                 <|> (method POST $
-                        fmap (intersect changeSet) . decode'
-                          <$> readRequestBody 10485760)
+  finalChangeSet' <- lift $ do
+        method GET (pure $ Just changeSet)
+    <|> (method POST $
+           fmap (intersect changeSet) . decode'
+             <$> readRequestBody 10485760)
 
-  maybe noParse a finalChangeSet'
+  maybe noParse (lift . a) finalChangeSet'
 
   where
-    noParse = clientError "Unable to parse request body" []
+    noParse = EitherT $ return $ Left $ clientError "Unable to parse request body" []
 
+
+--------------------------------------------------------------------------------
 writeJSON :: (MonadSnap m, ToJSON a) => a -> m ()
 writeJSON = writeLBS . encode
 
+
 --------------------------------------------------------------------------------
-parseTimeParameter :: MonadSnap m => m (Maybe UTCTime)
-parseTimeParameter = join . fmap parser <$> getParam "timeStamp"
+parseTimeParameter :: MonadSnap m => EitherT (m ()) m UTCTime
+parseTimeParameter = EitherT $
+  note (clientError "Timestamp could not be parsed" []) . join . fmap parser
+    <$> getParam "timeStamp"
   where parser = parseTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" .
           Text.unpack . Encoding.decodeUtf8
 
@@ -311,12 +306,14 @@ serverError e =
 
 
 --------------------------------------------------------------------------------
-emptyServer :: MonadSnap m => m ()
-emptyServer = serverError "The server has no change sets"
-
-
---------------------------------------------------------------------------------
 writeError :: MonadSnap m => Int -> [Aeson.Pair] -> m ()
 writeError code e = do
   writeLBS $ encode $ object e
   modifyResponse (setResponseCode code)
+
+--------------------------------------------------------------------------------
+assertNotEmpty :: MonadSnap m => IntMap.IntMap a -> EitherT (m ()) m ()
+assertNotEmpty x =
+  if IntMap.null x
+    then EitherT $ return (Left $ serverError "The server has no change sets")
+    else return ()

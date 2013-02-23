@@ -28,4 +28,7 @@ executable changed-mbid-service
     time,
     transformers,
     stm,
-    unix
+    unix,
+    errors,
+    either,
+    mtl
