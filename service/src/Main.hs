@@ -183,6 +183,7 @@ main = do
     route
       [ ("/since/:timeStamp", since changeSetsTVar dateMapperTVar)
       , ("/on/:timeStamp", changesOn changeSetsTVar dateMapperTVar)
+      , ("/latest", redirectToLatest changeSetsTVar)
       ]
 
 
@@ -254,10 +255,22 @@ changesOn changeSetsTVar dateMapperTVar = do
               clientError "Specified timestamp is later than the latest known changes"
                 [ "latest" .= fst (Map.findMax dateMapper) ]
             Just (_, csId) -> redirectTo csId
-  where
-    redirectTo csId = redirect $ Encoding.encodeUtf8 $ Text.pack $
-      "http://changed-mbids.musicbrainz.org/pub/musicbrainz/data/changed-mbids/changed-ids-" ++
-        (show csId) ++ ".json.gz"
+
+
+--------------------------------------------------------------------------------
+redirectTo :: MonadSnap m => Int -> m ()
+redirectTo csId = redirect $ Encoding.encodeUtf8 $ Text.pack $
+  "http://changed-mbids.musicbrainz.org/pub/musicbrainz/data/changed-mbids/changed-ids-" ++
+    (show csId) ++ ".json.gz"
+
+
+--------------------------------------------------------------------------------
+redirectToLatest :: MonadSnap m => TVar (IntMap.IntMap ChangeSet) -> m ()
+redirectToLatest changeSetsTVar = do
+  changeSets <- liftIO $ atomically $ readTVar changeSetsTVar
+  if IntMap.null changeSets
+    then emptyServer
+    else redirectTo (fst $ IntMap.findMax changeSets)
 
 
 --------------------------------------------------------------------------------
