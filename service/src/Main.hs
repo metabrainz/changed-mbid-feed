@@ -9,6 +9,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Either
 import Data.Aeson
+import Data.Configurator (Worth(..), autoReload, autoConfig, require)
 import Data.HashSet (HashSet)
 import Data.Hashable
 import Data.List (isSuffixOf)
@@ -67,6 +68,10 @@ intersect a b = ChangeSet
   , workChanges = workChanges a `HashSet.intersection` workChanges b
   }
 
+
+totalSize :: ChangeSet -> Int
+totalSize (ChangeSet artist label recording release rg work) =
+  sum $ map HashSet.size [ artist, label, recording, release, rg, work]
 
 --------------------------------------------------------------------------------
 -- | An 'MBID' is the plain text, base 16, representation of a UUID. This is
@@ -181,6 +186,8 @@ main = do
   let goReload = reload changeSetsTVar dateMapperTVar
   goReload
 
+  (cfg, _) <- autoReload autoConfig [ Required "service.config" ]
+
   void $ installHandler sigHUP (Catch goReload) Nothing
 
   quickHttpServe $ withCompression $ do
@@ -189,10 +196,12 @@ main = do
     (dateMapper, changeSets) <- liftIO $ atomically $
       (,) <$> readTVar dateMapperTVar <*> readTVar changeSetsTVar
 
+    maxRequestSize <- liftIO (require cfg "max-request-size")
+
     eitherT id return $ do
       assertNotEmpty changeSets
       lift $ route
-        [ ("/since/:timeStamp", since changeSets dateMapper)
+        [ ("/since/:timeStamp", since changeSets dateMapper maxRequestSize)
         , ("/on/:timeStamp", changesOn dateMapper)
         , ("/latest", redirectToLatest changeSets)
         ]
@@ -209,15 +218,15 @@ reload changeSetsTVar dateMapperTVar = do
 
 --------------------------------------------------------------------------------
 -- | Main request handler
-since :: MonadSnap m => IntMap.IntMap ChangeSet -> Map.Map UTCTime IntMap.Key -> m ()
-since changeSets dateMapper = eitherT id return $ do
+since :: MonadSnap m => IntMap.IntMap ChangeSet -> Map.Map UTCTime IntMap.Key -> Int -> m ()
+since changeSets dateMapper maxRequestSize = eitherT id return $ do
   t <- parseTimeParameter
 
   csId <- nearestChangeSet t dateMapper
   let (_, !cs, !futureCs) = IntMap.splitLookup csId changeSets
   let changeSet = mconcat $ catMaybes $ map Just (IntMap.elems futureCs) ++ [ cs ]
 
-  withFilteredChangeSet changeSet $ \c -> writeJSON $
+  withFilteredChangeSet changeSet maxRequestSize $ \c -> writeJSON $
     UnionPacket ChangePacket { packetChangeset = c
                              , packetTimestamp = fst $ Map.findMax dateMapper
                              }
@@ -257,18 +266,16 @@ redirectTo csId = redirect $ Encoding.encodeUtf8 $ Text.pack $
 
 
 --------------------------------------------------------------------------------
-withFilteredChangeSet :: MonadSnap m => ChangeSet -> (ChangeSet -> m ()) -> EitherT (m ()) m ()
-withFilteredChangeSet changeSet a = do
-  finalChangeSet' <- lift $ do
-        method GET (pure $ Just changeSet)
-    <|> (method POST $
-           fmap (intersect changeSet) . decode'
-             <$> readRequestBody 10485760)
+withFilteredChangeSet :: MonadSnap m => ChangeSet -> Int -> (ChangeSet -> m ()) -> EitherT (m ()) m ()
+withFilteredChangeSet changeSet maximumRequestSize a = do
+  filters <- EitherT $ note noParse . decode' <$> readRequestBody 10485760
 
-  maybe noParse (lift . a) finalChangeSet'
+  if totalSize filters > maximumRequestSize
+    then left $ clientError "Request too large" [ "max-size" .= maximumRequestSize]
+    else lift $ a (intersect changeSet filters)
 
   where
-    noParse = EitherT $ return $ Left $ clientError "Unable to parse request body" []
+    noParse = clientError "Unable to parse request body" []
 
 
 --------------------------------------------------------------------------------

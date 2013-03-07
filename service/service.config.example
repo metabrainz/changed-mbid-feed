@@ -1,0 +1,2 @@
+# The maximum amount of MBIDs that filtered per request
+max-request-size = 4000
