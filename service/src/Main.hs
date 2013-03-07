@@ -4,7 +4,7 @@ import Prelude hiding (readFile)
 import Control.Applicative
 import Control.Concurrent.STM
 import Control.Error (note)
-import Control.Monad (forM, join, mzero, void)
+import Control.Monad (forM, join, mzero, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Either
@@ -69,9 +69,11 @@ intersect a b = ChangeSet
   }
 
 
+--------------------------------------------------------------------------------
 totalSize :: ChangeSet -> Int
 totalSize (ChangeSet artist label recording release rg work) =
   sum $ map HashSet.size [ artist, label, recording, release, rg, work]
+
 
 --------------------------------------------------------------------------------
 -- | An 'MBID' is the plain text, base 16, representation of a UUID. This is
@@ -262,7 +264,7 @@ redirectToLatest changeSets = redirectTo (fst $ IntMap.findMax changeSets)
 redirectTo :: MonadSnap m => Int -> m ()
 redirectTo csId = redirect $ Encoding.encodeUtf8 $ Text.pack $
   "http://changed-mbids.musicbrainz.org/pub/musicbrainz/data/changed-mbids/changed-ids-" ++
-    (show csId) ++ ".json.gz"
+    show csId ++ ".json.gz"
 
 
 --------------------------------------------------------------------------------
@@ -272,7 +274,7 @@ withFilteredChangeSet changeSet maximumRequestSize a = do
 
   if totalSize filters > maximumRequestSize
     then left $ clientError "Request too large" [ "max-size" .= maximumRequestSize]
-    else lift $ a (intersect changeSet filters)
+    else lift $ a (changeSet `intersect` filters)
 
   where
     noParse = clientError "Unable to parse request body" []
@@ -301,7 +303,7 @@ clientError e extra =
 --------------------------------------------------------------------------------
 serverError :: MonadSnap m => Text -> m ()
 serverError e =
-  writeError 500 $ [ "error" .= e ]
+  writeError 500 [ "error" .= e ]
 
 
 --------------------------------------------------------------------------------
@@ -312,7 +314,5 @@ writeError code e = do
 
 --------------------------------------------------------------------------------
 assertNotEmpty :: MonadSnap m => IntMap.IntMap a -> EitherT (m ()) m ()
-assertNotEmpty x =
-  if IntMap.null x
-    then EitherT $ return (Left $ serverError "The server has no change sets")
-    else return ()
+assertNotEmpty x = when (IntMap.null x) $ EitherT $
+  return (Left $ serverError "The server has no change sets")
