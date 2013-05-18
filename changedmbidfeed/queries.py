@@ -500,7 +500,7 @@ queries = {
     """
     ,
     """
-    SELECT gid
+    SELECT r.gid
       FROM %schema%.track t
       JOIN %schema%.recording r ON t.recording = r.id
       WHERE t.last_updated >= %s
@@ -657,19 +657,9 @@ queries = {
     """
     ,
     """
-    SELECT gid
-      FROM %schema%.tracklist t
-      JOIN %schema%.medium m ON m.tracklist = t.id
-      JOIN %schema%.release r ON m.release = r.id
-      WHERE t.last_updated >= %s
-        AND t.last_updated < %s
-    """
-    ,
-    """
-    SELECT gid
+    SELECT r.gid
       FROM %schema%.track t
-      JOIN %schema%.tracklist tl ON tl.id = t.tracklist
-      JOIN %schema%.medium m ON m.tracklist = tl.id
+      JOIN %schema%.medium m ON m.id = t.medium
       JOIN %schema%.release r ON m.release = r.id
       WHERE t.last_updated >= %s
         AND t.last_updated < %s
@@ -679,8 +669,7 @@ queries = {
     SELECT r.gid
       FROM %schema%.recording rec
       JOIN %schema%.track t ON t.recording = rec.id
-      JOIN %schema%.tracklist tl ON tl.id = t.tracklist
-      JOIN %schema%.medium m ON m.tracklist = tl.id
+      JOIN %schema%.medium m ON m.id = t.medium
       JOIN %schema%.release r ON m.release = r.id
       WHERE rec.last_updated >= %s
         AND rec.last_updated < %s
